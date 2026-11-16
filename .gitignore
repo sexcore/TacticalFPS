@@ -1,0 +1,11 @@
+# OS and editor junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Local tooling (none used by this repo, kept out if ever added)
+node_modules/
+*.log
+.env
