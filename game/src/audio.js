@@ -78,6 +78,8 @@ export class AudioSys {
       case 'reload': this.tone(600, 0.05, { type: 'square', vol: 0.2 * vol }); this.tone(400, 0.05, { type: 'square', vol: 0.2 * vol, delay: 0.12 }); break;
       case 'switch': this.tone(500, 0.04, { type: 'square', vol: 0.18 * vol }); break;
       case 'throw': this.nz(0.12, { vol: 0.2 * vol, freq: 900 }); break;
+      case 'flash': this.nz(0.25, { vol: 0.8 * vol, freq: 5000, ftype: 'highpass' }); this.tone(3200, 0.5, { vol: 0.25 * vol, slide: 2800 }); break;
+      case 'smoke': this.nz(0.9, { vol: 0.35 * vol, freq: 700 }); break;
       case 'bounce': this.tone(300, 0.05, { vol: 0.25 * vol, slide: 180 }); break;
       case 'explode': this.nz(0.7, { vol: 1 * vol, freq: 400 }); this.tone(70, 0.5, { vol: 0.8 * vol, slide: 30 }); break;
       case 'hitmark': this.tone(1400, 0.04, { vol: 0.3 * vol }); break;

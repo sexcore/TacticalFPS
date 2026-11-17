@@ -1,8 +1,9 @@
 // Rounds: freeze / live / end phases, economy, bomb plant/defuse/pickup,
 // fuse and win conditions, match reset. The only module that ends a round.
-import { CFG, WEAPONS } from './config.js';
+// Match: first to 7 wins early; else most rounds after 12; a tie is a draw.
+import { CFG, WEAPONS, OBJECTIVE_NAME } from './config.js';
 import { SITES, SPAWNS } from './map.js';
-import { aliveOf, pushFeed, setBanner } from './state.js';
+import { aliveOf, pushFeed, pushRadio, setBanner } from './state.js';
 import { explodeAt } from './weapons.js';
 import { resetBotForRound } from './bots.js';
 import { dist2XZ } from './math.js';
@@ -18,7 +19,7 @@ export function siteAt(x, z) {
 function botLoadout(S, a) {
   const r = S.round;
   let primary = null;
-  if (r >= 4 && a.bot && a.bot.role === 'push') primary = 'lr88';
+  if (r >= 4 && a.bot && (a.bot.role === 'push' || a.bot.role === 'push2')) primary = 'lr88';
   else if (r >= 3) primary = 'ar4';
   else if (r >= 2) primary = 'k7';
   a.primary = primary;
@@ -28,14 +29,19 @@ function botLoadout(S, a) {
     a.mag[id] = WEAPONS[id].mag;
     a.reserve[id] = WEAPONS[id].reserve;
   }
-  a.grenades = r >= 2 ? 1 : 0;
+  a.nade.frag = r >= 2 ? 1 : 0;
+  a.nade.flash = 0;
+  a.nade.smoke = 0;
   a.armor = r >= 3 ? 100 : 0;
+  a.hasKit = a.team === 'G' && r >= 3;
 }
 
 export function startRound(S, W) {
   S.phase = 'freeze';
   S.phaseT = CFG.freezeTime;
   S.matchOver = false;
+  S.matchWinner = null;
+  S.roundLine = '';
   const bomb = S.bomb;
   bomb.state = 'carried';
   bomb.site = Math.random() < 0.5 ? 'A' : 'B';
@@ -59,9 +65,12 @@ export function startRound(S, W) {
     a.bombCarrier = false;
     a.reloadT = 0; a.fireT = 0; a.bloom = 0; a.recoilP = 0; a.recoilY = 0;
     a.crouch = false; a.hurtT = 0; a.deadT = 0; a.lastAttacker = null; a.onGround = true;
+    a.blindT = 0; a.intelT = -99; a.assistCand = null;
     if (a.isPlayer) {
       if (!survived) {
-        a.primary = null; a.secondary = 'p9'; a.weapon = 'p9'; a.grenades = 0; a.armor = 0;
+        a.primary = null; a.secondary = 'p9'; a.weapon = 'p9';
+        a.nade.frag = 0; a.nade.flash = 0; a.nade.smoke = 0;
+        a.armor = 0; a.hasKit = false;
         a.mag.p9 = WEAPONS.p9.mag; a.reserve.p9 = WEAPONS.p9.reserve;
       } else {
         for (const id of [a.primary, a.secondary]) {
@@ -81,8 +90,11 @@ export function startRound(S, W) {
   bomb.carrier = carrier;
   if (carrier) carrier.bombCarrier = true;
   for (const g of S.grenades) g.active = false;
+  for (const s of S.smokes) s.active = false;
+  if (W.fx.clearSmoke) W.fx.clearSmoke();
   S.noises.length = 0;
-  S.shake = 0; S.hitmark = 0; S.damageFlash = 0;
+  S.radio.length = 0;
+  S.shake = 0; S.hitmark = 0; S.damageFlash = 0; S.flashT = 0;
   setBanner(S, 'ROUND ' + S.round, 'Guard ' + S.score.G + ' — ' + S.score.S + ' Strike');
   W.audio.play('round', null);
 }
@@ -92,16 +104,17 @@ export function resetMatch(S) {
   S.losses.G = 0; S.losses.S = 0;
   S.round = 1;
   S.matchOver = false;
+  S.matchWinner = null;
+  S.roundLine = '';
   S.stats.shots = 0; S.stats.hits = 0; S.stats.headshots = 0;
   for (const a of S.agents) {
     a.money = CFG.startMoney;
-    a.kills = 0; a.deaths = 0;
+    a.kills = 0; a.deaths = 0; a.assists = 0; a.damage = 0; a.hsKills = 0;
   }
 }
 
 function endRound(S, W, winner, reason) {
   S.phase = 'end';
-  S.phaseT = CFG.endTime;
   S.winners = winner;
   S.score[winner]++;
   const loser = winner === 'G' ? 'S' : 'G';
@@ -115,9 +128,20 @@ function endRound(S, W, winner, reason) {
       : Math.min(CFG.lossCap, CFG.lossMoney + CFG.lossBonus * (S.losses[a.team] - 1));
     a.money = Math.min(CFG.maxMoney, a.money + gain);
   }
-  S.matchOver = S.score[winner] >= CFG.matchWins;
+  const earlyWin = S.score[winner] >= CFG.matchWins;
+  const lastRound = S.round >= CFG.maxRounds;
+  S.matchOver = earlyWin || lastRound;
+  if (S.matchOver) {
+    S.matchWinner = earlyWin ? winner : (S.score.G === S.score.S ? 'draw' : (S.score.G > S.score.S ? 'G' : 'S'));
+  }
+  S.phaseT = S.matchOver ? CFG.matchEndTime : CFG.endTime;
   const scoreLine = 'Guard ' + S.score.G + ' — ' + S.score.S + ' Strike';
-  setBanner(S, reason, S.matchOver ? (winner === 'G' ? 'GUARD WINS THE MATCH' : 'STRIKE WINS THE MATCH') + '  ·  ' + scoreLine : scoreLine);
+  let matchLine = '';
+  if (S.matchOver) {
+    matchLine = S.matchWinner === 'draw' ? 'MATCH DRAW' : (S.matchWinner === 'G' ? 'GUARD WINS THE MATCH' : 'STRIKE WINS THE MATCH');
+  }
+  S.roundLine = 'ROUND ' + S.round + ' — ' + reason + '  ·  ' + scoreLine;
+  setBanner(S, reason, S.matchOver ? matchLine + '  ·  ' + scoreLine : scoreLine);
   pushFeed(S, reason, winner === 'G' ? 'g' : 's');
   W.audio.play(winner === 'G' ? 'win' : 'lose', null);
 }
@@ -133,6 +157,7 @@ export function updateRounds(S, W, dt) {
   if (S.shake > 0) S.shake = Math.max(0, S.shake - dt * 1.6);
   if (S.hitmark > 0) S.hitmark -= dt;
   if (S.damageFlash > 0) S.damageFlash = Math.max(0, S.damageFlash - dt * 1.4);
+  if (S.flashT > 0) S.flashT = Math.max(0, S.flashT - dt);
 
   if (S.phase === 'freeze') {
     S.phaseT -= dt;
@@ -171,8 +196,14 @@ export function updateRounds(S, W, dt) {
         S.bomb.carrier = null;
         c.bombCarrier = false;
         c.channel = null;
-        setBanner(S, 'CHARGE PLANTED — SITE ' + site, 'Defuse it before detonation');
-        pushFeed(S, 'Charge planted at site ' + site, 's');
+        setBanner(S, 'FURNACE CORE PLANTED — SITE ' + site, 'Defuse it before detonation');
+        pushFeed(S, OBJECTIVE_NAME + ' planted at site ' + site, 's');
+        for (const g of S.agents) {
+          if (g.team === 'G' && g.alive && !g.isPlayer) {
+            pushRadio(S, g.name + ': Core planted — Site ' + site + '!');
+            break;
+          }
+        }
         W.audio.play('planted', null);
       }
     } else {
@@ -187,27 +218,28 @@ export function updateRounds(S, W, dt) {
         S.bomb.carrier = a;
         a.bombCarrier = true;
         W.audio.play('pickup', a);
-        pushFeed(S, a.name + ' recovered the charge', 's');
+        pushFeed(S, a.name + ' recovered the ' + OBJECTIVE_NAME, 's');
         break;
       }
     }
   }
-  // Defuse progress (persists across interruptions)
+  // Defuse progress (persists across interruptions). A defuse kit halves it.
   if (S.bomb.state === 'planted') {
-    let defusing = false;
+    let defuser = null;
     for (const a of S.agents) {
       if (a.team === 'G' && a.alive && a.channel && a.channel.kind === 'defuse'
         && dist2XZ(a.pos.x, a.pos.z, S.bomb.pos.x, S.bomb.pos.z) < 2.89
         && Math.hypot(a.vel.x, a.vel.z) < 0.5) {
-        defusing = true;
+        defuser = a;
         break;
       }
     }
-    if (defusing) {
+    if (defuser) {
       S.bomb.defuseT += dt;
-      if (S.bomb.defuseT >= CFG.defuseTime) {
+      const need = defuser.hasKit ? CFG.defuseTime / 2 : CFG.defuseTime;
+      if (S.bomb.defuseT >= need) {
         S.bomb.state = 'defused';
-        endRound(S, W, 'G', 'CHARGE DEFUSED');
+        endRound(S, W, 'G', 'FURNACE CORE DEFUSED');
         return;
       }
     }
@@ -226,7 +258,7 @@ export function updateRounds(S, W, dt) {
     if (S.bomb.fuse <= 0) {
       explodeAt(S, W, S.bomb.pos, 13, 230, null);
       S.bomb.state = 'exploded';
-      endRound(S, W, 'S', 'CHARGE DETONATED');
+      endRound(S, W, 'S', 'FURNACE CORE DETONATED');
       return;
     }
     if (gAlive === 0) { endRound(S, W, 'S', 'DEFENDERS ELIMINATED'); return; }

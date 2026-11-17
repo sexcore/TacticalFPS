@@ -21,7 +21,9 @@ export const CFG = {
   plantTime: 4,
   defuseTime: 5,
   endTime: 4,
-  matchWins: 5,
+  matchEndTime: 8, // longer end phase when the match ends, so the scoreboard reads
+  matchWins: 7, // first to 7 wins early (v2: 5v5, 12-round matches)
+  maxRounds: 12, // else most rounds after 12; a tie is a draw
   startMoney: 800,
   killMoney: 300,
   winMoney: 3250,
@@ -42,14 +44,25 @@ export const WEAPONS = {
   lr88: { name: 'LR-88 Marksman', price: 4750, slot: 1, damage: 96, headMult: 2, rpm: 55, mag: 5, reserve: 15, reload: 3.2, auto: false, range: 90, falloff: 0.9, spreadBase: 0.05, spreadMove: 6.0, spreadAir: 8.0, bloom: 2.4, bloomMax: 5.0, recoilPitch: 2.6, recoilYaw: 0.4, pellets: 1, zoom: 2.6 },
 };
 
-export const GRENADE = { name: 'Frag Charge', price: 300, fuse: 2.4, radius: 7.5, damage: 110, throwSpeed: 15, upSpeed: 4.5, bounce: 0.42, maxCarry: 2 };
+// The objective's name, used in every user-facing string (HUD, banners,
+// feed, README). Internal identifiers still say bomb/charge.
+export const OBJECTIVE_NAME = 'Furnace Core';
+
+export const GRENADES = {
+  frag: { name: 'Frag Charge', price: 300, fuse: 2.4, radius: 7.5, damage: 110, throwSpeed: 15, upSpeed: 4.5, bounce: 0.42, maxCarry: 2 },
+  flash: { name: 'Flash Charge', price: 200, fuse: 1.6, radius: 18, blindTime: 2.2, throwSpeed: 15, upSpeed: 4.5, bounce: 0.42, maxCarry: 2 },
+  smoke: { name: 'Smoke Charge', price: 250, fuse: 1.2, radius: 4.5, duration: 12, throwSpeed: 15, upSpeed: 4.5, bounce: 0.42, maxCarry: 2 },
+};
 export const ARMOR_PRICE = 650;
+export const KIT_PRICE = 400; // defuse kit, Guard only: defuse in half the time
 
 // Palette: dusk foundry — slate sky, warm lamps, rust, teal accents.
+// v2 brightened for readability (exposure/lights lifted in main.js too);
+// the amber/teal site landmark colors are unchanged.
 export const PALETTE = {
-  sky: 0x2b3a4a, fog: 0x2b3a4a, ground: 0x6b6259, concrete: 0x8a857c, dark: 0x4a4640,
+  sky: 0x35465a, fog: 0x35465a, ground: 0x7a7166, concrete: 0x8a857c, dark: 0x554f47,
   rust: 0x9a4a28, rustDark: 0x6e3319, metal: 0x5d6a72, teal: 0x2e8b8b, amber: 0xd98a2b,
-  crate: 0x7a5c38, guard: 0x2e7fb8, strike: 0xc25a2e, lamp: 0xffc06a, white: 0xe8e4da,
+  crate: 0x7a5c38, guard: 0x3a97d8, strike: 0xe8641f, lamp: 0xffc06a, white: 0xe8e4da,
 };
 
 export const TEAM = { GUARD: 'G', STRIKE: 'S' };

@@ -2,12 +2,39 @@
 // grenades, buy keys, defuse interact. Sim-side only; the camera mirrors it.
 import * as THREE from 'three';
 import { CFG, WEAPONS } from './config.js';
-import { moveBody } from './collide.js';
+import { moveBody, losClear } from './collide.js';
 import { clamp, dist2XZ } from './math.js';
-import { fireWeapon, startReload, switchWeapon, throwGrenade, tickAgent, aimDir, bodyHeight } from './weapons.js';
+import { fireWeapon, startReload, switchWeapon, throwGrenade, tickAgent, aimDir, bodyHeight, eyePos, smokeBlocks } from './weapons.js';
 import { tryBuy } from './hud.js';
 
 const _dir = new THREE.Vector3();
+const _eye = new THREE.Vector3();
+const NADE_KEYS = ['Digit4', 'Digit5', 'Digit6'];
+const NADE_KINDS = ['frag', 'flash', 'smoke'];
+
+/** Player vision + hearing feed the minimap's enemy dots (no omniscience:
+ *  an enemy shows only while recently seen or heard by the Guard team). */
+function updateIntel(S, W, p) {
+  if (S.phase !== 'live') return;
+  eyePos(p, _eye);
+  aimDir(p, _dir);
+  for (const t of S.agents) {
+    if (t.team === p.team || !t.alive) continue;
+    const dx = t.pos.x - _eye.x, dy = (t.pos.y + 1.15) - _eye.y, dz = t.pos.z - _eye.z;
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (d > 46) continue;
+    if ((_dir.x * dx + _dir.y * dy + _dir.z * dz) / Math.max(d, 0.01) < 0.45) continue;
+    if (!losClear(W.cols, _eye.x, _eye.y, _eye.z, t.pos.x, t.pos.y + 1.15, t.pos.z)) continue;
+    if (smokeBlocks(S, _eye.x, _eye.y, _eye.z, t.pos.x, t.pos.y + 1.15, t.pos.z)) continue;
+    t.intelT = S.time; t.intelX = t.pos.x; t.intelZ = t.pos.z;
+  }
+  for (const n of S.noises) {
+    if (!n.who || n.who.team === p.team) continue;
+    if (dist2XZ(p.pos.x, p.pos.z, n.x, n.z) < n.r * n.r) {
+      n.who.intelT = S.time; n.who.intelX = n.x; n.who.intelZ = n.z;
+    }
+  }
+}
 
 export function updatePlayer(S, W, input, hud, dt) {
   const p = S.player;
@@ -48,9 +75,10 @@ export function updatePlayer(S, W, input, hud, dt) {
     if (p.stepT <= 0) {
       p.stepT = p.crouch ? 0.55 : 0.38;
       W.audio.play('step', null);
-      S.noises.push({ x: p.pos.x, y: p.pos.y, z: p.pos.z, team: p.team, t: S.time, r: CFG.hearStep });
+      S.noises.push({ x: p.pos.x, y: p.pos.y, z: p.pos.z, team: p.team, t: S.time, r: CFG.hearStep, who: p });
     }
   }
+  updateIntel(S, W, p);
   // Zoom (marksman rifle only)
   p.zoomed = input.rDown && p.weapon === 'lr88';
   // Fire (live phase only)
@@ -73,14 +101,20 @@ export function updatePlayer(S, W, input, hud, dt) {
     if (input.wasPressed('Digit1')) tryBuy(S, W, 'k7');
     else if (input.wasPressed('Digit2')) tryBuy(S, W, 'ar4');
     else if (input.wasPressed('Digit3')) tryBuy(S, W, 'lr88');
-    else if (input.wasPressed('Digit4')) tryBuy(S, W, 'grenade');
+    else if (input.wasPressed('Digit4')) tryBuy(S, W, 'frag');
     else if (input.wasPressed('Digit5')) tryBuy(S, W, 'armor');
+    else if (input.wasPressed('Digit6')) tryBuy(S, W, 'flash');
+    else if (input.wasPressed('Digit7')) tryBuy(S, W, 'smoke');
+    else if (input.wasPressed('Digit8')) tryBuy(S, W, 'kit');
   } else {
     if (input.wasPressed('Digit1') && p.primary) switchWeapon(S, W, p, p.primary);
     if (input.wasPressed('Digit2')) switchWeapon(S, W, p, p.secondary);
     if ((input.wasPressed('Digit3') || input.wasPressed('KeyG')) && S.phase === 'live') {
       aimDir(p, _dir);
-      throwGrenade(S, W, p, _dir);
+      throwGrenade(S, W, p, _dir, p.nadeSel);
+    }
+    for (let i = 0; i < NADE_KEYS.length; i++) {
+      if (input.wasPressed(NADE_KEYS[i])) p.nadeSel = NADE_KINDS[i];
     }
   }
   // Defuse: hold E, standing still, next to a planted charge

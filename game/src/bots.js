@@ -1,18 +1,23 @@
 // Bots: nav-graph movement, vision cone + hearing, burst fire, objectives.
-// Strike roles: carrier (plants), push (mid then site), lurk (holds mid).
-// Guard roles: holdA / holdB (posts, rotate to a planted charge, defuse).
+// Strike roles: carrier (plants), push/push2 (mid then site), lurk (holds
+// mid), flank (west lane then site). Guard roles: holdA / holdB (site
+// posts), holdMid (mid hall), holdCon (connector); all rotate to a planted
+// charge and defuse. Guard bots share what they see/hear as minimap intel
+// and speak radio callouts on real perception events.
 import * as THREE from 'three';
 import { CFG } from './config.js';
-import { findPath, nearestNode, SITES } from './map.js';
+import { findPath, nearestNode, SITES, areaAt } from './map.js';
 import { moveBody, losClear } from './collide.js';
 import { angleLerp, angleDiff, clamp, rand, dist2XZ } from './math.js';
-import { fireWeapon, startReload, eyePos, throwGrenade, tickAgent, bodyHeight } from './weapons.js';
+import { fireWeapon, startReload, eyePos, throwGrenade, tickAgent, bodyHeight, smokeBlocks } from './weapons.js';
+import { pushRadio } from './state.js';
 
 const BOT_SPEED = 4.0;
 const BOT_SEE = 46;
 const BOT_FOV = 2.1;
 const BOT_TURN = 3.6;
 const SITE_NODE = { A: 10, B: 33 };
+const POST_NODE = { holdA: 39, holdB: 41, holdMid: 17, holdCon: 48 };
 
 const _eye = new THREE.Vector3();
 const _dir = new THREE.Vector3();
@@ -28,6 +33,7 @@ export function initBot(a, role) {
     lookYaw: a.yaw, lookPitch: 0, scanBase: a.yaw, scanT: rand(0, 6),
     mvx: 0, mvz: 0, stuckT: 0, lastX: 0, lastZ: 0, checkT: 0,
     knownX: 0, knownZ: 0, knowT: 0, thrown: false, waitT: 0,
+    callT: 0, retakeCalled: false, defuseCalled: false,
   };
 }
 
@@ -37,7 +43,8 @@ export function resetBotForRound(a) {
   b.target = null; b.reactT = 0; b.loseT = 0; b.burstLeft = 0; b.burstPause = 0;
   b.strafeT = 0; b.lookYaw = a.yaw; b.lookPitch = 0; b.scanBase = a.yaw;
   b.mvx = 0; b.mvz = 0; b.stuckT = 0; b.knowT = 0; b.thrown = false;
-  b.waitT = b.role === 'push' ? 1.2 : 0;
+  b.callT = 0; b.retakeCalled = false; b.defuseCalled = false;
+  b.waitT = (b.role === 'push' || b.role === 'push2') ? 1.2 : 0;
   a.channel = null; a.crouch = false;
 }
 
@@ -57,10 +64,11 @@ function duty(S, W, a) {
   const b = a.bot;
   if (a.team === 'S') {
     if (b.role === 'carrier') setDest(S, W, a, SITE_NODE[S.bomb.site], 'site');
-    else if (b.role === 'push') setDest(S, W, a, 16, 'mid');
+    else if (b.role === 'push' || b.role === 'push2') setDest(S, W, a, 16, 'mid');
+    else if (b.role === 'flank') setDest(S, W, a, 5, 'flank');
     else setDest(S, W, a, 16, 'lurk');
   } else {
-    setDest(S, W, a, b.role === 'holdA' ? 39 : 41, 'post');
+    setDest(S, W, a, POST_NODE[b.role] || 39, 'post');
   }
 }
 
@@ -71,26 +79,36 @@ function canSee(S, W, a, t) {
   if (d2 > BOT_SEE * BOT_SEE) return false;
   const yawTo = Math.atan2(-dx, -dz);
   if (Math.abs(angleDiff(yawTo, a.yaw)) > BOT_FOV / 2) return false;
-  return losClear(W.cols, _eye.x, _eye.y, _eye.z, t.pos.x, t.pos.y + 1.15, t.pos.z);
+  if (!losClear(W.cols, _eye.x, _eye.y, _eye.z, t.pos.x, t.pos.y + 1.15, t.pos.z)) return false;
+  return !smokeBlocks(S, _eye.x, _eye.y, _eye.z, t.pos.x, t.pos.y + 1.15, t.pos.z);
 }
 
 function perceive(S, W, a, b, dt) {
+  if (b.callT > 0) b.callT -= dt;
+  const blind = a.blindT > 0;
   let best = null, bestD = Infinity;
-  for (const t of S.agents) {
-    if (t.team === a.team || !t.alive) continue;
-    const d2 = dist2XZ(a.pos.x, a.pos.z, t.pos.x, t.pos.z);
-    if (d2 >= bestD) continue;
-    if (canSee(S, W, a, t)) { best = t; bestD = d2; }
+  if (!blind) {
+    for (const t of S.agents) {
+      if (t.team === a.team || !t.alive) continue;
+      const d2 = dist2XZ(a.pos.x, a.pos.z, t.pos.x, t.pos.z);
+      if (d2 >= bestD) continue;
+      if (canSee(S, W, a, t)) { best = t; bestD = d2; }
+    }
   }
   if (best) {
     if (b.target !== best) {
       b.reactT = rand(0.3, 0.55);
       b.aimErrY = rand(-0.07, 0.07);
       b.aimErrP = rand(-0.04, 0.04);
+      if (a.team === 'G' && b.callT <= 0) {
+        pushRadio(S, a.name + ': Contact, ' + areaAt(best.pos.x, best.pos.z) + '!');
+        b.callT = 8;
+      }
     }
     b.target = best;
     b.loseT = 0;
     b.knownX = best.pos.x; b.knownZ = best.pos.z; b.knowT = 1.5;
+    if (a.team === 'G') { best.intelT = S.time; best.intelX = best.pos.x; best.intelZ = best.pos.z; }
   } else {
     b.target = null;
   }
@@ -98,11 +116,14 @@ function perceive(S, W, a, b, dt) {
     if (n.team === a.team) continue;
     if (dist2XZ(a.pos.x, a.pos.z, n.x, n.z) < n.r * n.r) {
       b.knownX = n.x; b.knownZ = n.z; b.knowT = 1.2;
+      if (a.team === 'G' && n.who && n.who.team !== 'G') {
+        n.who.intelT = S.time; n.who.intelX = n.x; n.who.intelZ = n.z;
+      }
     }
   }
   if (a.hurtT > 0.1 && a.lastAttacker && a.lastAttacker.alive) {
     b.knownX = a.lastAttacker.pos.x; b.knownZ = a.lastAttacker.pos.z; b.knowT = 2;
-    if (canSee(S, W, a, a.lastAttacker)) {
+    if (!blind && canSee(S, W, a, a.lastAttacker)) {
       b.target = a.lastAttacker;
       b.reactT = Math.min(b.reactT, 0.15);
       b.loseT = 0;
@@ -117,7 +138,7 @@ function arrive(S, W, a) {
   if (b.purpose === 'site') {
     if (b.role === 'carrier' && S.bomb.state === 'carried') b.state = 'plant';
     else { b.state = 'hold'; b.scanBase = yawToPoint(a, 0, 28); }
-  } else if (b.purpose === 'mid') {
+  } else if (b.purpose === 'mid' || b.purpose === 'flank') {
     setDest(S, W, a, SITE_NODE[S.bomb.site], 'site');
   } else if (b.purpose === 'lurk') {
     b.state = 'hold'; b.scanBase = yawToPoint(a, 0, 24);
@@ -168,6 +189,10 @@ function updateHold(S, W, a, b, dt) {
   a.crouch = a.team === 'G' && (a.id % 2 === 0);
   if (S.bomb.state === 'planted' && a.team === 'G') {
     setDest(S, W, a, nearestNode(W.nav, S.bomb.pos.x, S.bomb.pos.z), 'retake');
+    if (!b.retakeCalled) {
+      b.retakeCalled = true;
+      pushRadio(S, a.name + ': Rotating to Site ' + S.bomb.site + '!');
+    }
   } else if (S.bomb.state === 'planted' && b.role === 'lurk') {
     setDest(S, W, a, SITE_NODE[S.bomb.site], 'site');
   } else if (b.purpose === 'investigate') {
@@ -220,9 +245,9 @@ function updateEngage(S, W, a, b, dt) {
     b.burstLeft--;
     if (b.burstLeft <= 0) b.burstPause = rand(0.3, 0.55);
   }
-  if (!b.thrown && a.grenades > 0 && dist > 10 && dist < 28 && Math.random() < 0.004) {
+  if (!b.thrown && a.nade.frag > 0 && dist > 10 && dist < 28 && Math.random() < 0.004) {
     _dir.set(dx, dy + 3, dz).normalize();
-    if (throwGrenade(S, W, a, _dir)) b.thrown = true;
+    if (throwGrenade(S, W, a, _dir, 'frag')) b.thrown = true;
   }
 }
 
@@ -248,6 +273,10 @@ function updateDefuse(S, W, a, b) {
     return;
   }
   a.channel = { kind: 'defuse' };
+  if (!b.defuseCalled) {
+    b.defuseCalled = true;
+    pushRadio(S, a.name + ': Defusing the Furnace Core — cover me!');
+  }
   b.lookYaw = yawToPoint(a, S.bomb.pos.x, S.bomb.pos.z);
   b.lookPitch = -0.3;
 }
@@ -295,7 +324,7 @@ export function updateBots(S, W, dt) {
       a.stepT -= dt;
       if (a.stepT <= 0) {
         a.stepT = 0.42;
-        S.noises.push({ x: a.pos.x, y: a.pos.y, z: a.pos.z, team: a.team, t: S.time, r: CFG.hearStep });
+        S.noises.push({ x: a.pos.x, y: a.pos.y, z: a.pos.z, team: a.team, t: S.time, r: CFG.hearStep, who: a });
       }
     }
   }

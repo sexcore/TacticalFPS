@@ -12,9 +12,14 @@ export function makeAgent(team, name, isPlayer) {
     pos: new THREE.Vector3(), vel: new THREE.Vector3(),
     yaw: 0, pitch: 0, crouch: false, onGround: true,
     weapon: 'p9', primary: null, secondary: 'p9',
-    mag: {}, reserve: {}, grenades: 0,
+    mag: {}, reserve: {},
+    nade: { frag: 0, flash: 0, smoke: 0 }, nadeSel: 'frag',
+    hasKit: false, blindT: 0,
+    intelT: -99, intelX: 0, intelZ: 0, // last time/place the Guard team saw or heard this agent
     reloadT: 0, fireT: 0, bloom: 0, recoilP: 0, recoilY: 0,
-    kills: 0, deaths: 0, money: CFG.startMoney,
+    kills: 0, deaths: 0, assists: 0, damage: 0, hsKills: 0,
+    assistCand: null, assistT: -99, // last other attacker, for assist credit
+    money: CFG.startMoney,
     bot: null, mesh: null, parts: null,
     deadT: 0, hurtT: 0, stepT: 0, bombCarrier: false,
     channel: null, // {kind:'plant'|'defuse', t, dur}
@@ -41,11 +46,15 @@ export function createState() {
       plantT: 0, defuseT: 0,
     },
     grenades: [],
+    smokes: [], // active smoke clouds {x,y,z,r,t} — block bot vision + player sight
     noises: [],
     feed: [],
+    radio: [], // teammate callouts {text, t}; text only
+    radioT: -99, // last callout time, throttles the radio line
+    roundLine: '',
     banner: null,
-    shake: 0, hitmark: 0, hitHead: false, damageFlash: 0, damageDir: 0,
-    started: false, paused: false, matchOver: false,
+    shake: 0, hitmark: 0, hitHead: false, damageFlash: 0, damageDir: 0, flashT: 0,
+    started: false, paused: false, matchOver: false, matchWinner: null,
     stats: { shots: 0, hits: 0, headshots: 0 },
     winners: TEAM.GUARD,
   };
@@ -60,6 +69,14 @@ export function aliveOf(S, team) {
 export function pushFeed(S, text, cls) {
   S.feed.push({ text, cls: cls || '', t: S.time });
   if (S.feed.length > 6) S.feed.shift();
+}
+
+/** Teammate callout. Throttled globally so the radio never floods. */
+export function pushRadio(S, text) {
+  if (S.time - S.radioT < 1.2) return;
+  S.radioT = S.time;
+  S.radio.push({ text, t: S.time });
+  if (S.radio.length > 4) S.radio.shift();
 }
 
 export function setBanner(S, text, sub) {

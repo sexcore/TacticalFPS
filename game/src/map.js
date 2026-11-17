@@ -55,9 +55,22 @@ export const SITES = {
 };
 
 export const SPAWNS = {
-  G: [[-3, 27], [3, 27], [0, 29]],
-  S: [[0, -28], [-4, -29], [4, -29]],
+  G: [[-3, 27], [3, 27], [0, 29], [-6, 28], [6, 28]],
+  S: [[0, -28], [-4, -29], [4, -29], [-7, -27], [7, -27]],
 };
+
+/** Named area for the minimap location label and bot callouts. */
+export function areaAt(x, z) {
+  if (Math.abs(x - SITES.A.cx) <= SITES.A.hw + 3 && Math.abs(z - SITES.A.cz) <= SITES.A.hd + 3) return 'SITE A · FURNACE';
+  if (Math.abs(x - SITES.B.cx) <= SITES.B.hw + 3 && Math.abs(z - SITES.B.cz) <= SITES.B.hd + 3) return 'SITE B · YARD';
+  if (Math.abs(x) <= 9 && z >= -6 && z <= 6) return 'MID HALL';
+  if (Math.abs(x) <= 16 && z >= 10 && z <= 14) return 'CONNECTOR';
+  if (z >= 22) return 'GUARD SPAWN';
+  if (z <= -22) return 'STRIKE SPAWN';
+  if (x <= -24) return 'WEST LANE';
+  if (x >= 24) return 'EAST LANE';
+  return z < 0 ? 'NORTH YARD' : 'SOUTH YARD';
+}
 
 // Nav graph: [x, z] nodes, undirected edges. Checked edge by edge vs BOXES.
 export const WAYPOINTS = [
@@ -223,13 +236,13 @@ export function buildMap(scene) {
   skyC.width = 32; skyC.height = 256;
   const sctx = skyC.getContext('2d');
   const grad = sctx.createLinearGradient(0, 0, 0, 256);
-  grad.addColorStop(0.0, '#131c26');
-  grad.addColorStop(0.30, '#2b3a4a');
-  grad.addColorStop(0.42, '#6b5a44');
-  grad.addColorStop(0.47, '#d98a2b');
-  grad.addColorStop(0.52, '#8a5a34');
-  grad.addColorStop(0.60, '#4a3a2c');
-  grad.addColorStop(1.0, '#2a211a');
+  grad.addColorStop(0.0, '#1a2534');
+  grad.addColorStop(0.30, '#35465a');
+  grad.addColorStop(0.42, '#7a6a50');
+  grad.addColorStop(0.47, '#e09a35');
+  grad.addColorStop(0.52, '#96653c');
+  grad.addColorStop(0.60, '#54432f');
+  grad.addColorStop(1.0, '#33291e');
   sctx.fillStyle = grad; sctx.fillRect(0, 0, 32, 256);
   const skyTex = new THREE.CanvasTexture(skyC);
   skyTex.colorSpace = THREE.SRGBColorSpace;

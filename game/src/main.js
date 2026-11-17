@@ -12,7 +12,7 @@ import { Input } from './input.js';
 import { updatePlayer } from './player.js';
 import { updateBots, initBot } from './bots.js';
 import { updateRounds, startRound, resetMatch } from './rounds.js';
-import { initGrenades, updateGrenades, eyePos } from './weapons.js';
+import { initGrenades, updateGrenades, updateSmokes, eyePos } from './weapons.js';
 import { clamp, DEG } from './math.js';
 
 const canvas = document.getElementById('game');
@@ -22,19 +22,19 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.15;
+renderer.toneMappingExposure = 1.35;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(PALETTE.sky);
-scene.fog = new THREE.Fog(PALETTE.fog, 42, 115);
+scene.fog = new THREE.Fog(PALETTE.fog, 48, 130);
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.05, 220);
 camera.rotation.order = 'YXZ';
 scene.add(camera);
 
-const hemi = new THREE.HemisphereLight(0x8fa3b8, 0x3a352e, 0.85);
+const hemi = new THREE.HemisphereLight(0x8fa3b8, 0x3a352e, 1.05);
 scene.add(hemi);
-const sun = new THREE.DirectionalLight(0xffd9a0, 2.6);
+const sun = new THREE.DirectionalLight(0xffd9a0, 3.0);
 sun.position.set(30, 42, 20);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
@@ -54,16 +54,24 @@ const W = { cols: map.colliders, nav: map.nav, fx, audio };
 const player = makeAgent('G', 'You', true);
 const bram = makeAgent('G', 'Bram', false);
 const kessler = makeAgent('G', 'Kessler', false);
+const odo = makeAgent('G', 'Odo', false);
+const petra = makeAgent('G', 'Petra', false);
 const vex = makeAgent('S', 'Vex', false);
 const rook = makeAgent('S', 'Rook', false);
 const mara = makeAgent('S', 'Mara', false);
-S.agents = [player, bram, kessler, vex, rook, mara];
+const joss = makeAgent('S', 'Joss', false);
+const tarn = makeAgent('S', 'Tarn', false);
+S.agents = [player, bram, kessler, odo, petra, vex, rook, mara, joss, tarn];
 S.player = player;
 initBot(bram, 'holdA');
 initBot(kessler, 'holdB');
+initBot(odo, 'holdMid');
+initBot(petra, 'holdCon');
 initBot(vex, 'carrier');
 initBot(rook, 'push');
 initBot(mara, 'lurk');
+initBot(joss, 'push2');
+initBot(tarn, 'flank');
 initGrenades(S);
 
 // ---------------------------------------------------------------- meshes
@@ -81,7 +89,41 @@ const MATS = {
   dark: new THREE.MeshStandardMaterial({ color: 0x2c2c30, roughness: 0.85 }),
   skin: new THREE.MeshStandardMaterial({ color: 0xc9a686, roughness: 0.75 }),
   gunmetal: new THREE.MeshStandardMaterial({ color: 0x565660, roughness: 0.6, metalness: 0.05 }),
+  flash: new THREE.MeshStandardMaterial({ color: 0xf2f2e8, roughness: 0.5 }),
+  smoke: new THREE.MeshStandardMaterial({ color: 0x6a7a5a, roughness: 0.8 }),
 };
+
+// Name tags: canvas sprite with the agent's name + health bar, drawn only
+// when HP changes. Enemies show only while recently seen/heard (same intel
+// rule as the minimap) — never through walls.
+function makeTag(a) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 128; canvas.height = 36;
+  const ctx = canvas.getContext('2d');
+  const tex = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: true }));
+  sprite.scale.set(1.4, 0.4, 1);
+  sprite.position.y = 2.15;
+  return { sprite, canvas, ctx, tex, lastHp: -1 };
+}
+
+function drawTag(a) {
+  const tag = a.tag;
+  const hp = Math.max(0, Math.ceil(a.hp));
+  if (hp === tag.lastHp) return;
+  tag.lastHp = hp;
+  const c = tag.ctx;
+  c.clearRect(0, 0, 128, 36);
+  c.font = 'bold 16px sans-serif';
+  c.textAlign = 'center';
+  c.fillStyle = a.team === 'G' ? '#4db2e8' : '#ff7a45';
+  c.fillText(a.name, 64, 17);
+  c.fillStyle = 'rgba(0,0,0,0.6)';
+  c.fillRect(16, 24, 96, 5);
+  c.fillStyle = hp > 50 ? '#7dd87d' : hp > 25 ? '#e8b64d' : '#e84d4d';
+  c.fillRect(16, 24, 96 * hp / 100, 5);
+  tag.tex.needsUpdate = true;
+}
 
 function buildAgentMesh(team) {
   const root = new THREE.Group();
@@ -116,6 +158,9 @@ for (const a of S.agents) {
   a.mesh = built.root;
   a.parts = built;
   if (a.isPlayer) a.mesh.visible = false;
+  a.tag = makeTag(a);
+  a.mesh.add(a.tag.sprite);
+  drawTag(a);
 }
 
 // Viewmodel guns (camera children, one visible per weapon class)
@@ -219,10 +264,28 @@ S.phase = 'menu';
 
 // ---------------------------------------------------------------- sync
 const _eye = new THREE.Vector3();
+const _fwd = new THREE.Vector3();
+const _to = new THREE.Vector3();
 let bobPhase = 0;
 let zoomK = 0;
 let blinkPhase = 0;
 let fov = 75;
+
+function syncTag(a) {
+  if (a.isPlayer) { a.tag.sprite.visible = false; return; }
+  if (!a.alive) { a.tag.sprite.visible = false; return; }
+  if (a.team === 'G') {
+    a.tag.sprite.visible = true;
+  } else {
+    // Enemy tags: fresh intel, in front of the camera, within sight range.
+    _to.copy(a.pos).sub(camera.position);
+    const d = _to.length();
+    camera.getWorldDirection(_fwd);
+    const facing = d > 0.01 ? _to.dot(_fwd) / d : 1;
+    a.tag.sprite.visible = S.time - a.intelT < 2 && facing > 0.1 && d < 46;
+  }
+  if (a.tag.sprite.visible) drawTag(a);
+}
 
 function syncAgent(a, dt) {
   const m = a.mesh;
@@ -337,6 +400,7 @@ function syncProps(dt) {
     g.mesh.visible = g.active;
     if (g.active) {
       g.mesh.position.copy(g.pos);
+      g.mesh.material = g.kind === 'flash' ? MATS.flash : g.kind === 'smoke' ? MATS.smoke : MATS.gunmetal;
       g.mesh.rotation.x += dt * 6;
       g.mesh.rotation.z += dt * 4;
     }
@@ -362,6 +426,7 @@ function frame(now) {
       updatePlayer(S, W, input, hud, CFG.simDt);
       updateBots(S, W, CFG.simDt);
       updateGrenades(S, W, CFG.simDt);
+      updateSmokes(S, CFG.simDt);
       acc -= CFG.simDt;
       steps++;
     }
@@ -372,6 +437,7 @@ function frame(now) {
     if (S.paused) input.discard();
   }
   for (const a of S.agents) syncAgent(a, dtRender);
+  for (const a of S.agents) syncTag(a);
   syncCamera(dtRender);
   syncProps(dtRender);
   fx.update(dtRender);
@@ -380,3 +446,35 @@ function frame(now) {
 }
 
 renderer.setAnimationLoop(frame);
+
+// Read-only debug snapshot for screenshot capture tooling. Off by default;
+// enabled only with ?debug=1 in the URL. Returns a plain-object copy — no
+// live references, no mutation API, no effect on gameplay.
+if (new URLSearchParams(location.search).get('debug') === '1') {
+  window.__foundry = () => ({
+    time: S.time,
+    phase: S.phase,
+    phaseT: S.phaseT,
+    round: S.round,
+    score: { G: S.score.G, S: S.score.S },
+    matchOver: S.matchOver,
+    matchWinner: S.matchWinner,
+    bomb: {
+      state: S.bomb.state, site: S.bomb.site,
+      x: S.bomb.pos.x, z: S.bomb.pos.z,
+      fuse: S.bomb.fuse, plantT: S.bomb.plantT, defuseT: S.bomb.defuseT,
+      carrier: S.bomb.carrier ? S.bomb.carrier.name : null,
+    },
+    player: {
+      x: player.pos.x, z: player.pos.z, yaw: player.yaw, pitch: player.pitch,
+      hp: player.hp, alive: player.alive, channel: player.channel ? player.channel.kind : null,
+      hasKit: player.hasKit,
+    },
+    radio: S.radio.map((r) => r.text),
+    agents: S.agents.map((a) => ({
+      name: a.name, team: a.team, x: a.pos.x, z: a.pos.z,
+      yaw: a.yaw, hp: a.hp, alive: a.alive, isPlayer: a.isPlayer,
+    })),
+    nav: { nodes: W.nav.nodes, adj: W.nav.adj },
+  });
+}

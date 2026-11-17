@@ -71,6 +71,29 @@ export class FX {
     this.boomIdx = 0;
     this.boomLight = new THREE.PointLight(0xff8030, 0, 26, 1.6);
     scene.add(this.boomLight);
+    // Flash burst: one big white sprite + light, reused
+    this.flashSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.flashTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+    this.flashSprite.scale.set(6, 6, 1);
+    this.flashSprite.visible = false;
+    scene.add(this.flashSprite);
+    this.flashLife = 0;
+    // Smoke clouds: pooled groups of soft grey spheres. Opaque enough to
+    // block sight both ways; the sim mirrors them in S.smokes for bot vision.
+    this.clouds = [];
+    const puffGeo = new THREE.SphereGeometry(1, 10, 8);
+    for (let i = 0; i < 4; i++) {
+      const g = new THREE.Group();
+      const puffs = [];
+      for (let j = 0; j < 6; j++) {
+        const m = new THREE.Mesh(puffGeo, new THREE.MeshBasicMaterial({ color: 0x9a9a94, transparent: true, opacity: 0.85 }));
+        g.add(m);
+        puffs.push(m);
+      }
+      g.visible = false;
+      scene.add(g);
+      this.clouds.push({ group: g, puffs, life: 0, max: 1, r: 4 });
+    }
+    this.cloudIdx = 0;
   }
 
   tracer(from, to) {
@@ -128,6 +151,35 @@ export class FX {
     }
   }
 
+  flash(pos) {
+    this.flashSprite.position.copy(pos);
+    this.flashSprite.visible = true;
+    this.flashLife = 0.22;
+    this.muzzleLight.position.copy(pos);
+    this.muzzleLight.intensity = 60;
+  }
+
+  smoke(pos, r, dur) {
+    const c = this.clouds[this.cloudIdx];
+    this.cloudIdx = (this.cloudIdx + 1) % this.clouds.length;
+    c.group.position.set(pos.x, Math.max(0.6, pos.y), pos.z);
+    c.r = r;
+    c.max = c.life = dur;
+    for (const m of c.puffs) {
+      const a = Math.random() * Math.PI * 2;
+      const d = Math.random() * r * 0.55;
+      m.position.set(Math.cos(a) * d, 0.4 + Math.random() * 1.4, Math.sin(a) * d);
+      m.userData.s = r * (0.55 + Math.random() * 0.5);
+      m.scale.set(m.userData.s, m.userData.s * 0.8, m.userData.s);
+      m.material.opacity = 0.85;
+    }
+    c.group.visible = true;
+  }
+
+  clearSmoke() {
+    for (const c of this.clouds) { c.life = 0; c.group.visible = false; }
+  }
+
   update(dt) {
     for (const t of this.tracers) {
       if (t.life <= 0) continue;
@@ -162,5 +214,24 @@ export class FX {
       b.s2.material.opacity = (1 - k) * 0.7;
     }
     if (this.boomLight.intensity > 0) this.boomLight.intensity = Math.max(0, this.boomLight.intensity - dt * 260);
+    if (this.flashLife > 0) {
+      this.flashLife -= dt;
+      if (this.flashLife <= 0) this.flashSprite.visible = false;
+      else this.flashSprite.material.opacity = this.flashLife / 0.22;
+    }
+    for (const c of this.clouds) {
+      if (c.life <= 0) continue;
+      c.life -= dt;
+      if (c.life <= 0) { c.group.visible = false; continue; }
+      const age = 1 - c.life / c.max;
+      const fade = c.life < 2 ? c.life / 2 : 1;
+      const grow = 1 + age * 0.25;
+      for (const m of c.puffs) {
+        m.position.y += dt * 0.12;
+        m.material.opacity = 0.85 * fade;
+        const s = m.userData.s * grow;
+        m.scale.set(s, s * 0.8, s);
+      }
+    }
   }
 }

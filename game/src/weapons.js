@@ -2,7 +2,7 @@
 // Shared by the player and the bots — one damage path for every shooter.
 // W is the world context { cols, fx, audio } built by main.js.
 import * as THREE from 'three';
-import { CFG, WEAPONS, GRENADE } from './config.js';
+import { CFG, WEAPONS, GRENADES, ARMOR_PRICE, KIT_PRICE } from './config.js';
 import { pushFeed } from './state.js';
 import { rayWorld, moveBody, losClear } from './collide.js';
 import { clamp, DEG } from './math.js';
@@ -132,12 +132,20 @@ export function fireWeapon(S, W, a, dir) {
   a.recoilY += (Math.random() - 0.5) * 2 * w.recoilYaw;
   if (a.isPlayer) S.stats.shots++;
   W.audio.playAt('shot_' + a.weapon, a.pos, 1);
-  S.noises.push({ x: a.pos.x, y: a.pos.y, z: a.pos.z, team: a.team, t: S.time, r: CFG.hearShot });
+  S.noises.push({ x: a.pos.x, y: a.pos.y, z: a.pos.z, team: a.team, t: S.time, r: CFG.hearShot, who: a });
   return true;
 }
 
 export function damageAgent(S, W, target, dmg, attacker, head, hitPos) {
   if (!target.alive) return;
+  if (attacker && attacker !== target) {
+    attacker.damage += dmg;
+    // Assist candidate: the previous distinct attacker, if still recent.
+    if (target.lastAttacker && target.lastAttacker !== attacker) {
+      target.assistCand = target.lastAttacker;
+      target.assistT = S.time;
+    }
+  }
   target.hp -= dmg;
   target.hurtT = 0.25;
   target.lastAttacker = attacker;
@@ -164,8 +172,13 @@ export function killAgent(S, W, target, attacker, head) {
   target.channel = null;
   if (attacker && attacker !== target) {
     attacker.kills++;
+    if (head) attacker.hsKills++;
     if (attacker.isPlayer) attacker.money = Math.min(16000, attacker.money + CFG.killMoney);
+    if (target.assistCand && target.assistCand !== attacker && S.time - target.assistT < 8) {
+      target.assistCand.assists++;
+    }
   }
+  target.assistCand = null;
   if (target.bombCarrier) {
     target.bombCarrier = false;
     S.bomb.state = 'dropped';
@@ -201,6 +214,7 @@ export function updateReload(S, a, dt) {
 export function tickAgent(S, a, dt) {
   if (a.fireT > 0) a.fireT -= dt;
   if (a.hurtT > 0) a.hurtT -= dt;
+  if (a.blindT > 0) a.blindT -= dt;
   if (a.bloom > 0) a.bloom = Math.max(0, a.bloom - dt * 2.2);
   const rc = Math.exp(-dt * 5);
   a.recoilP *= rc;
@@ -220,23 +234,29 @@ export function switchWeapon(S, W, a, id) {
 // ---------------------------------------------------------------- grenades
 
 export function initGrenades(S) {
-  for (let i = 0; i < 6; i++) {
-    S.grenades.push({ active: false, pos: new THREE.Vector3(), vel: new THREE.Vector3(), fuse: 0, owner: null, mesh: null });
+  for (let i = 0; i < 8; i++) {
+    S.grenades.push({ active: false, kind: 'frag', pos: new THREE.Vector3(), vel: new THREE.Vector3(), fuse: 0, owner: null, mesh: null });
+  }
+  for (let i = 0; i < 4; i++) {
+    S.smokes.push({ active: false, x: 0, y: 0, z: 0, r: 0, t: 0 });
   }
 }
 
-export function throwGrenade(S, W, a, dir) {
-  if (a.grenades <= 0 || a.fireT > 0) return false;
+export function throwGrenade(S, W, a, dir, kind) {
+  kind = kind || a.nadeSel;
+  const g0 = GRENADES[kind];
+  if (!g0 || a.nade[kind] <= 0 || a.fireT > 0) return false;
   for (const g of S.grenades) {
     if (g.active) continue;
     eyePos(a, g.pos);
-    g.vel.copy(dir).multiplyScalar(GRENADE.throwSpeed);
-    g.vel.y += GRENADE.upSpeed;
+    g.vel.copy(dir).multiplyScalar(g0.throwSpeed);
+    g.vel.y += g0.upSpeed;
     g.vel.addScaledVector(a.vel, 0.5);
-    g.fuse = GRENADE.fuse;
+    g.fuse = g0.fuse;
+    g.kind = kind;
     g.owner = a;
     g.active = true;
-    a.grenades--;
+    a.nade[kind]--;
     a.fireT = 0.5;
     W.audio.play('throw', a);
     return true;
@@ -244,17 +264,76 @@ export function throwGrenade(S, W, a, dir) {
   return false;
 }
 
+/** True when the segment between two points crosses an active smoke cloud. */
+export function smokeBlocks(S, ax, ay, az, bx, by, bz) {
+  for (const s of S.smokes) {
+    if (!s.active) continue;
+    const dx = bx - ax, dy = by - ay, dz = bz - az;
+    const len2 = dx * dx + dy * dy + dz * dz;
+    let t = len2 > 0 ? ((s.x - ax) * dx + (s.y - ay) * dy + (s.z - az) * dz) / len2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const cx = ax + dx * t - s.x, cy = ay + dy * t - s.y, cz = az + dz * t - s.z;
+    if (cx * cx + cy * cy + cz * cz < s.r * s.r) return true;
+  }
+  return false;
+}
+
+function detonateFlash(S, W, pos) {
+  W.fx.flash(pos);
+  W.audio.playAt('flash', pos, 1.2);
+  S.noises.push({ x: pos.x, y: pos.y, z: pos.z, team: 'G', t: S.time, r: 40, who: null });
+  const g0 = GRENADES.flash;
+  for (const a of S.agents) {
+    if (!a.alive) continue;
+    eyePos(a, _from);
+    const dx = pos.x - _from.x, dy = pos.y - _from.y, dz = pos.z - _from.z;
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (d > g0.radius) continue;
+    if (!losClear(W.cols, pos.x, pos.y, pos.z, _from.x, _from.y, _from.z)) continue;
+    // Facing check: the flash must be roughly in front of the agent.
+    const cp = Math.cos(a.pitch);
+    const fx = -Math.sin(a.yaw) * cp, fy = Math.sin(a.pitch), fz = -Math.cos(a.yaw) * cp;
+    const facing = d > 0.01 ? (fx * dx + fy * dy + fz * dz) / d : 1;
+    if (facing < -0.2) continue;
+    const blind = Math.max(0.4, g0.blindTime * (1 - 0.6 * (d / g0.radius)));
+    a.blindT = Math.max(a.blindT, blind);
+    if (a.isPlayer) S.flashT = Math.max(S.flashT, blind);
+  }
+}
+
+function detonateSmoke(S, W, pos) {
+  const g0 = GRENADES.smoke;
+  for (const s of S.smokes) {
+    if (s.active) continue;
+    s.active = true;
+    s.x = pos.x; s.y = Math.max(0.8, pos.y); s.z = pos.z;
+    s.r = g0.radius; s.t = g0.duration;
+    break;
+  }
+  W.fx.smoke(pos, g0.radius, g0.duration);
+  W.audio.playAt('smoke', pos, 0.8);
+}
+
+export function updateSmokes(S, dt) {
+  for (const s of S.smokes) {
+    if (!s.active) continue;
+    s.t -= dt;
+    if (s.t <= 0) s.active = false;
+  }
+}
+
 export function updateGrenades(S, W, dt) {
   for (const g of S.grenades) {
     if (!g.active) continue;
+    const g0 = GRENADES[g.kind];
     g.fuse -= dt;
     g.vel.y -= CFG.gravity * dt;
     const px = g.vel.x, py = g.vel.y, pz = g.vel.z;
     const ground = moveBody(W.cols, g.pos, g.vel, dt, 0.12, 0.24);
-    if (g.vel.x === 0 && px !== 0) g.vel.x = -px * GRENADE.bounce;
-    if (g.vel.z === 0 && pz !== 0) g.vel.z = -pz * GRENADE.bounce;
+    if (g.vel.x === 0 && px !== 0) g.vel.x = -px * g0.bounce;
+    if (g.vel.z === 0 && pz !== 0) g.vel.z = -pz * g0.bounce;
     if (g.vel.y === 0 && py < -1.5) {
-      g.vel.y = -py * GRENADE.bounce;
+      g.vel.y = -py * g0.bounce;
       W.audio.playAt('bounce', g.pos, 0.4);
     }
     if (ground) {
@@ -263,7 +342,9 @@ export function updateGrenades(S, W, dt) {
     }
     if (g.fuse <= 0) {
       g.active = false;
-      explodeAt(S, W, g.pos, GRENADE.radius, GRENADE.damage, g.owner);
+      if (g.kind === 'flash') detonateFlash(S, W, g.pos);
+      else if (g.kind === 'smoke') detonateSmoke(S, W, g.pos);
+      else explodeAt(S, W, g.pos, g0.radius, g0.damage, g.owner);
     }
   }
 }
@@ -273,7 +354,7 @@ export function explodeAt(S, W, pos, radius, damage, owner) {
   W.fx.explosion(pos);
   W.audio.playAt('explode', pos, 1.4);
   S.shake = Math.min(1, S.shake + 0.7);
-  S.noises.push({ x: pos.x, y: pos.y, z: pos.z, team: owner ? owner.team : 'G', t: S.time, r: 40 });
+  S.noises.push({ x: pos.x, y: pos.y, z: pos.z, team: owner ? owner.team : 'G', t: S.time, r: 40, who: owner || null });
   for (const t of S.agents) {
     if (!t.alive) continue;
     const dx = t.pos.x - pos.x, dy = (t.pos.y + 0.9) - pos.y, dz = t.pos.z - pos.z;
@@ -302,17 +383,26 @@ export function buyWeapon(S, W, a, id) {
 }
 
 export function buyArmor(S, W, a) {
-  if (a.armor > 0 || a.money < 650) return false;
-  a.money -= 650;
+  if (a.armor > 0 || a.money < ARMOR_PRICE) return false;
+  a.money -= ARMOR_PRICE;
   a.armor = 100;
   W.audio.play('buy', null);
   return true;
 }
 
-export function buyGrenade(S, W, a) {
-  if (a.grenades >= GRENADE.maxCarry || a.money < GRENADE.price) return false;
-  a.money -= GRENADE.price;
-  a.grenades++;
+export function buyGrenade(S, W, a, kind) {
+  const g0 = GRENADES[kind || 'frag'];
+  if (!g0 || a.nade[kind || 'frag'] >= g0.maxCarry || a.money < g0.price) return false;
+  a.money -= g0.price;
+  a.nade[kind || 'frag']++;
+  W.audio.play('buy', null);
+  return true;
+}
+
+export function buyKit(S, W, a) {
+  if (a.team !== 'G' || a.hasKit || a.money < KIT_PRICE) return false;
+  a.money -= KIT_PRICE;
+  a.hasKit = true;
   W.audio.play('buy', null);
   return true;
 }
